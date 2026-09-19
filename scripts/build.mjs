@@ -1,0 +1,15 @@
+import {build} from 'esbuild';
+import {mkdir,copyFile,readdir,readFile} from 'node:fs/promises';
+import path from 'node:path';
+await mkdir('dist/wasm',{recursive:true});
+await build({entryPoints:['src/background.js','src/panel.js','src/local-worker.js'],outdir:'dist',bundle:true,format:'esm',platform:'browser',target:'chrome120',minify:true,legalComments:'eof'});
+await build({entryPoints:['src/content.js'],outdir:'dist',bundle:true,format:'iife',platform:'browser',target:'chrome120',minify:true});
+for(const name of ['panel.html','panel.css'])await copyFile(`public/${name}`,`dist/${name}`);
+await copyFile('node_modules/@huggingface/transformers/LICENSE','dist/TRANSFORMERS-LICENSE.txt');
+await copyFile('public/ONNX-RUNTIME-LICENSE.txt','dist/ONNX-RUNTIME-LICENSE.txt');
+await copyFile('manifest.json','dist/manifest.json');
+for(const name of await readdir('node_modules/onnxruntime-web/dist'))if(/^ort-wasm.*\.(mjs|wasm)$/.test(name))await copyFile(path.join('node_modules/onnxruntime-web/dist',name),path.join('dist/wasm',name));
+const manifest=JSON.parse(await readFile('dist/manifest.json','utf8'));
+for(const file of [manifest.background.service_worker,'content.js','panel.html','panel.js','local-worker.js','wasm/ort-wasm-simd-threaded.wasm'])await readFile(`dist/${file}`);
+if(manifest.content_security_policy.extension_pages.includes("'unsafe-eval'"))throw Error('Unsafe CSP');
+console.log('Built loadable Manifest V3 extension in dist/ with locally packaged scripts and WASM.');

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Sentinel — private browser assistant",
+  "version": "0.1.2",
+  "description": "Review redacted page text before running a local or Gemini browser assistant.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*", "https://huggingface.co/*", "https://*.huggingface.co/*", "https://*.hf.co/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "Open Sentinel"},
+  "content_security_policy": {"extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; worker-src 'self'; connect-src 'self' https://generativelanguage.googleapis.com https://huggingface.co https://*.huggingface.co https://*.hf.co;"},
+  "web_accessible_resources": [{"resources": ["panel.html", "panel.css", "panel.js", "local-worker.js", "wasm/*"], "matches": ["http://*/*", "https://*/*"]}]
+}

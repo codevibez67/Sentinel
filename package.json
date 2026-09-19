@@ -1,0 +1,10 @@
+{
+  "name": "sentinel-extension",
+  "version": "0.1.2",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test --test-isolation=none tests/*.test.js", "build": "node scripts/build.mjs", "check": "npm run test && npm run build", "fixture": "node scripts/fixture-server.mjs" },
+  "dependencies": { "@huggingface/transformers": "3.8.1" },
+  "devDependencies": { "esbuild": "0.25.9", "@playwright/test": "1.63.0", "fake-indexeddb": "6.2.2" },
+  "overrides": { "sharp": "0.35.4" }
+}
