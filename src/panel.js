@@ -2,9 +2,10 @@ import {callGemini,checkGeminiConnection} from './providers.js';
 import {upgradeGeminiModel} from './core/models.js';
 import {PROFILE_FIELDS} from './core/policy.js';
 const $=id=>document.getElementById(id),token=location.hash.slice(1);
+let boundTabId=Number(new URL(location.href).searchParams.get('tabId')),windowId,scanTimer,switching=Promise.resolve();
 let vault,worker,workerPending,aborter,epoch=0,pending,busy=false;
 const rpc=async(type,extra={})=>{
-  const r=await chrome.runtime.sendMessage({type,token,...extra});
+  const r=await chrome.runtime.sendMessage({type,token,targetTabId:boundTabId,...extra});
   if(!r?.ok) throw Error(r?.error || 'The extension could not connect. Reopen it from the toolbar.');
   return r.data;
 };
@@ -14,14 +15,14 @@ function show(page) {document.querySelectorAll('.page').forEach(e=>e.classList.t
 function status(text) {$('status').textContent=text;}
 function setBusy(value) {
   busy=value;
-  for(const id of ['scan','approve','run','prompt','provider','mode','preview','download']) $(id).disabled=value;
+  for(const id of ['scan','run','prompt','provider','mode','preview','download']) $(id).disabled=value;
   $('stop').disabled=!value;
-  if(!value) {$('run').disabled=true;$('approve').disabled=!$('preview').value;}
+  if(!value) $('run').disabled=!$('preview').value || !$('prompt').value.trim();
 }
 async function invalidate() {
   epoch++;aborter?.abort();pending=null;$('confirmation').hidden=true;
   if(workerPending){worker?.terminate();worker=null;workerPending.reject(Error('Stopped.'));workerPending=null;}
-  await rpc('stop');setBusy(false);$('run').disabled=true;status('NEEDS REVIEW');
+  await rpc('stop');setBusy(false);$('run').disabled=true;status('READY');
 }
 function localCall(type,payload) {
   if(!vault.localConsent) throw Error('Download the local model in Settings first.');
@@ -35,24 +36,28 @@ function localCall(type,payload) {
     worker.onerror=()=>{workerPending?.reject(Error('The local model worker could not start.'));workerPending=null;worker?.terminate();worker=null;};
   }
   return new Promise((resolve,reject)=>{
-    const timer=type==='generate'?setTimeout(()=>{worker?.terminate();worker=null;workerPending=null;reject(Error('Local processing exceeded three minutes. Finish the model download in Settings, or select Gemini and approve again.'));},180000):null;
+    const timer=type==='generate'?setTimeout(()=>{worker?.terminate();worker=null;workerPending=null;reject(Error('Local processing exceeded three minutes. Finish the model download in Settings, or select Gemini and run again.'));},180000):null;
     workerPending={resolve:value=>{clearTimeout(timer);resolve(value);},reject:error=>{clearTimeout(timer);reject(error);}};worker.postMessage({type,payload});
   });
 }
 async function scan() {
+  clearTimeout(scanTimer);
   await invalidate();notice('');log('Reading page and redacting locally…');setBusy(true);
+  $('prompt').disabled=false;
+  $('preview').value='';
+  const scanEpoch=epoch;
   try {
     const result=await rpc('scan',{prompt:$('prompt').value,provider:$('provider').value,mode:$('mode').value});
-    $('prompt').value=result.payload.prompt;
+    if(scanEpoch!==epoch)return;
     $('preview').value=JSON.stringify({text:result.payload.page.text,elements:result.payload.page.elements},null,2);
     $('route').textContent=`${result.payload.provider.toUpperCase()} · ${result.payload.model} · ${result.reason}`;
     $('destination').textContent=`Approved filling destination: ${result.origin}`;
     $('unsupported').textContent=`${result.payload.page.unsupported} image/frame regions excluded`;
-    log('Redacted preview ready. Review it, then Approve.');status('NEEDS REVIEW');
-  } finally {setBusy(false);}
+    log('Redacted preview ready. Enter your task and click Run task.');status('READY');
+  } finally {if(scanEpoch===epoch)setBusy(false);}
 }
 async function afterAction(result) {
-  if(result.finished) {setBusy(false);status(result.type==='finish'?'FINISHED':'ERROR');log(`${result.type==='finish'?'Model reports completion':'Task stopped'}: ${result.summary}`);$('approve').disabled=true;return;}
+  if(result.finished) {setBusy(false);status(result.type==='finish'?'FINISHED':'ERROR');log(`${result.type==='finish'?'Model reports completion':'Task stopped'}: ${result.summary}`);return;}
   if(result.navigated) {log('Opening destination. Review the new page before continuing.');return;}
   log('Action executed. Reading the updated page…');await scan();
 }
@@ -66,9 +71,15 @@ async function execute(action,id,confirmed=false) {
   await afterAction(result);
 }
 async function run() {
+  if(!$('prompt').value.trim())throw Error('Enter a task before running.');
+  clearTimeout(scanTimer);
   notice('');const runEpoch=++epoch;setBusy(true);status('RUNNING');
   try {
+    const approved=await rpc('approve',{page:JSON.parse($('preview').value),prompt:$('prompt').value,provider:$('provider').value,mode:$('mode').value});
+    if(epoch!==runEpoch)return;
+    $('preview').value=JSON.stringify({text:approved.page.text,elements:approved.page.elements},null,2);
     const {id,payload}=await rpc('run');
+    if(epoch!==runEpoch)return;
     log(`Processing approved text with ${payload.provider==='local'?'the local model':'Gemini'}…`);
     $('model-progress').textContent=`Waiting for ${payload.model}…`;
     aborter=new AbortController();
@@ -81,28 +92,42 @@ async function run() {
   }
 }
 function guard(fn) {return async event=>{try{await fn(event);}catch(e){notice(e.message);log(e.message);if(busy)await invalidate().catch(()=>{});}};}
+chrome.runtime.onMessage.addListener((message,sender)=>{
+  if(sender.id===chrome.runtime.id && message.type==='page-ready' && message.tabId===boundTabId && vault)guard(scan)();
+});
+chrome.tabs.onActivated.addListener(info=>{
+  if(info.windowId!==windowId || info.tabId===boundTabId)return;
+  epoch++;aborter?.abort();clearTimeout(scanTimer);
+  $('preview').value='';$('destination').textContent='Reading the active tab…';$('run').disabled=true;
+  switching=switching.catch(()=>{}).then(guard(async()=>{
+    await invalidate();
+    const result=await rpc('switch-tab',{nextTabId:info.tabId});
+    boundTabId=result.tabId;
+    await scan();
+  }));
+});
 function fillSettings() {
   for(const field of PROFILE_FIELDS) document.querySelector(`[name="${field}"]`).value=vault.profile[field] || '';
   $('api-key').value=vault.apiKey;$('gemini-model').value=vault.geminiModel;$('keywords').value=vault.keywords.join('\n');
 }
-async function save() {await invalidate();await rpc('save',{vault});$('preview').value='';$('approve').disabled=true;notice('Saved encrypted on this device. Scan again to apply your changes.');}
+async function save() {await invalidate();await rpc('save',{vault});await scan();notice('Saved encrypted on this device. Privacy preview updated.');}
 for(const field of PROFILE_FIELDS) {
   const label=document.createElement('label');label.textContent=field[0].toUpperCase()+field.slice(1);
   const input=document.createElement('input');input.name=field;input.type=field==='password'?'password':field==='email'?'email':'text';input.autocomplete='off';label.append(input);$('profile-fields').append(label);
 }
 document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>show(b.dataset.page));
 $('scan').onclick=guard(scan);
-$('approve').onclick=guard(async()=>{
-  if(!$('prompt').value.trim())throw Error('Enter a task before approving.');
-  const payload=await rpc('approve',{page:JSON.parse($('preview').value)});
-  $('preview').value=JSON.stringify({text:payload.page.text,elements:payload.page.elements},null,2);
-  $('run').disabled=false;$('approve').disabled=true;status('APPROVED');log('Preview approved. Run is a separate step.');
-});
+$('scan').textContent='Refresh privacy preview';
 $('run').onclick=guard(run);
 $('stop').onclick=guard(async()=>{await invalidate();log('Stopped. No further actions will run.');});
 $('close').onclick=guard(async()=>{await invalidate();worker?.terminate();await rpc('close');});
-for(const id of ['prompt','provider','mode']) $(id).addEventListener('input',guard(async()=>{await invalidate();$('preview').value='';$('approve').disabled=true;}));
-$('preview').addEventListener('input',guard(invalidate));
+for(const id of ['prompt','provider','mode']) $(id).addEventListener('input',()=>{
+  // Draft edits do not scan, rewrite the prompt, or start inference. Run takes
+  // the complete current draft and sanitizes it in the background first.
+  $('run').disabled=busy || !$('preview').value || !$('prompt').value.trim();
+  if(id==='provider')$('route').textContent='Your selected model will be applied when you run the task.';
+});
+$('preview').addEventListener('input',guard(async()=>{await invalidate();setBusy(false);}));
 $('confirm-action').onclick=guard(async()=>{
   if(!pending)return;const p=pending;
   if(p.url && !await chrome.permissions.request({origins:[`${new URL(p.url).origin}/*`]})) throw Error('Destination access was not granted.');
@@ -124,7 +149,7 @@ $('verify-gemini').onclick=guard(async()=>{
     const key=$('api-key').value.trim(),model=upgradeGeminiModel($('gemini-model').value.trim());
     await checkGeminiConnection(key,model,undefined,fetch,notice);
     vault.apiKey=key;vault.geminiModel=model;$('gemini-model').value=model;await save();$('provider').value='gemini';
-    notice(`Gemini connected: ${model}. Open Assistant, scan, approve, and Run.`);log(`Gemini connection verified: ${model}.`);
+    notice(`Gemini connected: ${model}. Open Assistant, enter your task, and click Run task.`);log(`Gemini connection verified: ${model}.`);
   } finally {button.disabled=false;}
 });
 $('download').onclick=guard(async()=>{
@@ -135,15 +160,15 @@ $('delete-data').onclick=guard(async()=>{
   if(!confirm('Delete your encrypted profile, Gemini key, keywords, and downloaded model cache?'))return;
   await invalidate();worker?.terminate();worker=null;await rpc('delete');
   for(const name of await caches.keys())await caches.delete(name);
-  vault=(await rpc('init')).vault;fillSettings();$('preview').value='';$('prompt').value='';$('approve').disabled=true;notice('Local profile, settings and model cache deleted.');
+  vault=(await rpc('init')).vault;fillSettings();$('preview').value='';$('prompt').value='';notice('Local profile, settings and model cache deleted.');
 });
 try {
-  const initial=await rpc('init');vault=initial.vault;fillSettings();
+  const initial=await rpc('init');vault=initial.vault;boundTabId=initial.tabId;windowId=initial.windowId;fillSettings();
   // Keep the ephemeral approval/execution state alive while this interface is open.
   // If the browser suspends the interface, the worker still fails closed on lost state.
   setInterval(()=>rpc('ping').catch(()=>{}),20000);
   $('prompt').value=typeof initial.draft==='string'?initial.draft:(initial.draft.prompt || '');
   if(initial.draft.provider)$('provider').value=initial.draft.provider;
   if(initial.draft.mode)$('mode').value=initial.draft.mode;
-  if(!Object.values(vault.profile).some(Boolean))show('profile');else await scan();
+  await guard(scan)();
 }catch(e){notice(e.message);document.querySelectorAll('button,input,select,textarea').forEach(e=>e.disabled=true);}

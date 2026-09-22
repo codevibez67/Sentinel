@@ -2,7 +2,7 @@ import {redact} from './core/redact.js';
 
 if(!globalThis.__sentinelInstalled) {
   globalThis.__sentinelInstalled=true;
-  let host,root,frame,overlay,rules={};
+  let host,root,overlay,rules={};
   const ids=new WeakMap(), targets=new Map(), documentId=crypto.randomUUID();
   let sequence=0,revision=0,lastSignature='';
   const idFor=el=>{if(!ids.has(el)){const id=`e${++sequence}`;ids.set(el,id);targets.set(id,el);}return ids.get(el);};
@@ -49,15 +49,13 @@ if(!globalThis.__sentinelInstalled) {
     }
     for(const el of document.querySelectorAll('input,textarea,select')) if(visible(el) && el.value) add(el.getBoundingClientRect());
   }
-  function mount(token) {
+  function mount() {
     if(host) return;
     host=document.createElement('div');host.id='sentinel-root';
     host.style.cssText='all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;';
     root=host.attachShadow({mode:'closed'});
-    overlay=document.createElement('div');frame=document.createElement('iframe');
-    frame.src=chrome.runtime.getURL(`panel.html#${token}`);frame.title='Sentinel private assistant';
-    frame.style.cssText='position:fixed;right:18px;top:18px;width:min(620px,calc(100vw - 36px));height:calc(100vh - 36px);border:1px solid #cad4dd;border-radius:18px;box-shadow:0 20px 70px #10253655;pointer-events:auto;background:#f7f9fc;color-scheme:light;';
-    root.append(overlay,frame);document.documentElement.append(host);
+    overlay=document.createElement('div');
+    root.append(overlay);document.documentElement.append(host);
   }
   function execute(message) {
     const current=collect();
@@ -92,7 +90,7 @@ if(!globalThis.__sentinelInstalled) {
       else if(message.type==='scan') {rules=message.rules; const {nodes,...snapshot}=collect();mask();result=snapshot;}
       else if(message.type==='check') {const {nodes,...snapshot}=collect();result=snapshot;}
       else if(message.type==='execute') result=execute(message);
-      else if(message.type==='close') {host?.remove();host=null;frame=null;overlay=null;rules={};result={};}
+      else if(message.type==='close') {host?.remove();host=null;overlay=null;rules={};result={};}
       else return;
       respond({ok:true,data:result});
     } catch(e) {respond({ok:false,error:e.message});}
